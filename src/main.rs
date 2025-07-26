@@ -1,44 +1,98 @@
-use anyhow::Result;
-use rmcp::{
-    ServerHandler, ServiceExt,
-    model::{ServerCapabilities, ServerInfo},
-    schemars, tool,
-    transport::stdio,
-};
-use libphext;
+// src/main.rs
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-const USER_AGENT: &str = "sqm/1.0";
-
-#[derive(Debug, serde::Deserialize)]
-pub struct PhextResponse {
-    pub scroll: String
+#[derive(Serialize, Deserialize, Debug)]
+struct JsonRpcRequest {
+    jsonrpc: String,
+    method: String,
+    params: Option<Value>,
+    id: Option<Value>,
 }
 
-#[derive(Debug, Clone)]
-pub struct sqclient {
-    client: reqwest::Client,
+#[derive(Serialize, Deserialize, Debug)]
+struct JsonRpcResponse {
+    jsonrpc: String,
+    result: Option<Value>,
+    error: Option<Value>,
+    id: Option<Value>,
 }
 
-async fn make_request<T>(&self, url: &str) -> Result<T, String>
-where
-    T: serde::de::DeserializeOwned,
-{
-    let response = self
-        .client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {}", e))?;
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let stdin = tokio::io::stdin();
+    let mut stdout = tokio::io::stdout();
+    let mut reader = BufReader::new(stdin);
+    let mut line = String::new();
 
-    match response.status() {
-        reqwest::StatusCode::OK => response
-            .json::<T>()
-            .await
-            .map_err(|e| format!("Failed to parse response: {}", e)),
-        status => Err(format!("Request failed with status: {}", status)),
+    // Send initialize response
+    println!("MCP Server starting...");
+    
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) => break, // EOF
+            Ok(_) => {
+                if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(&line) {
+                    let response = handle_request(request).await;
+                    let response_json = serde_json::to_string(&response)?;
+                    stdout.write_all(response_json.as_bytes()).await?;
+                    stdout.write_all(b"\n").await?;
+                    stdout.flush().await?;
+                }
+            }
+            Err(e) => eprintln!("Error reading line: {}", e),
+        }
     }
+
+    Ok(())
 }
 
-fn main() {
-    println!("sqm v{}", env!("CARGO_PKG_VERSION"));
+async fn handle_request(request: JsonRpcRequest) -> JsonRpcResponse {
+    match request.method.as_str() {
+        "initialize" => JsonRpcResponse {
+            jsonrpc: "2.0".to_string(),
+            result: Some(json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {
+                    "resources": {},
+                    "tools": {}
+                },
+                "serverInfo": {
+                    "name": "sq-mcp-server",
+                    "version": "1.0.0"
+                }
+            })),
+            error: None,
+            id: request.id,
+        },
+        "resources/list" => {
+            // This is where you'd use libphext-rs to get your mind maps
+            JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                result: Some(json!({
+                    "resources": [
+                        {
+                            "uri": "phext://mindmap/1",
+                            "name": "Sample Mind Map",
+                            "mimeType": "application/x-phext"
+                        }
+                    ]
+                })),
+                error: None,
+                id: request.id,
+            }
+        },
+        _ => JsonRpcResponse {
+            jsonrpc: "2.0".to_string(),
+            result: None,
+            error: Some(json!({
+                "code": -32601,
+                "message": "Method not found"
+            })),
+            id: request.id,
+        }
+    }
 }
